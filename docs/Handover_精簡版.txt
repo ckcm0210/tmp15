@@ -1,0 +1,113 @@
+│ 以下係交接用 Handover（精簡版，供明日快速接手），只回報、不再改檔。                                                  │
+│                                                                                                                      │
+│ 一、當前狀態（Today）                                                                                                │
+│                                                                                                                      │
+│  • 內嵌 Timeline                                                                                                     │
+│     • 主程式會背景啟動 Flask 伺服器，並已將 OPEN_TIMELINE_ON_START 設為 True（預設啟動自動開                         │
+│       http://127.0.0.1:5000/ui/timeline）。                                                                          │
+│  • 設定 UI（Tkinter）                                                                                                │
+│     • 已還原為單排分頁 Notebook。                                                                                    │
+│     • 你剛手動還原過 settings_ui.py；現時能看到「時間線 / Timeline」分頁，但內裡未有欄位（原因：PARAMS_SPEC 未包含   │
+│       Timeline 的 10 個欄位 spec，見下）。                                                                           │
+│     • 遇到 RuntimeError: main thread is not in main loop（在 tk.Variable.del 觸發）；我已經將多數 tk.Variable 加上   │
+│       master=self，但仍有殘留或銷毀次序問題。                                                                        │
+│  • 狀態文件（Docs）                                                                                                  │
+│     • Conversation_Log 已持續更新（最新至 12:55）。                                                                  │
+│     • Handover_Progress_Tracker 已記錄主要里程碑，但「UI 修復」項仍需明天標註「已完成」後的最終狀態。                │
+│                                                                                                                      │
+│ 二、已知問題（Blockers）                                                                                             │
+│                                                                                                                      │
+│  1 Tkinter RuntimeError: main thread is not in main loop                                                             │
+│     • 徵象：在 Python 3.12，下線時 del 內檢查 _tk 導致錯誤。                                                         │
+│     • 可能成因：                                                                                                     │
+│        • 尚有 tk.Variable 未綁定 master=self。                                                                       │
+│        • 某些 tk.Variable 或 widget 被垃圾回收時，root 已先被 destroy（銷毀次序）。                                  │
+│        • 在非主執行緒創建/操作了 Tk 元件。                                                                           │
+│        • 控件引用被丟失過早 GC（如 var 屬性未綁定到 widget，或放在暫時變數上）。                                     │
+│  2 「時間線 / Timeline」分頁空白                                                                                     │
+│     • TABS 中已有該分頁，但 PARAMS_SPEC 沒有對應的 10 個欄位定義，所以不會渲染任何控件。                             │
+│     • 需補入以下 spec（key/label/help/type）：                                                                       │
+│        • UI_TIMELINE_DEFAULT_DAYS（int）                                                                             │
+│        • UI_TIMELINE_PAGE_SIZE（int）                                                                                │
+│        • UI_TIMELINE_MAX_PAGE_SIZE（int）                                                                            │
+│        • UI_TIMELINE_WARN_DAYS（int）                                                                                │
+│        • UI_TIMELINE_GROUP_BY_BASEKEY（bool）                                                                        │
+│        • PATH_MAPPINGS（multiline，字串跳脫已修）                                                                    │
+│        • ENABLE_TIMELINE_SERVER（bool）                                                                              │
+│        • TIMELINE_SERVER_HOST（text）                                                                                │
+│        • TIMELINE_SERVER_PORT（int）                                                                                 │
+│        • OPEN_TIMELINE_ON_START（bool）                                                                              │
+│  3 滾動灰色空白                                                                                                      │
+│     • 使用 Canvas + Scrollbar 的自製可滾動區；向上滾動時出現大面積灰底空白。                                         │
+│     • 常見原因：scrollregion 未及時更新，或內層寬度未跟隨外層調整。                                                  │
+│                                                                                                                      │
+│ 三、明日處理方案（Step-by-step Plan） P1 先解 Tkinter RuntimeError（主線務必先通）                                   │
+│                                                                                                                      │
+│  • 全面審核 tk.Variable                                                                                              │
+│     • 把所有 tk.StringVar()/BooleanVar()（包含多處重複與動態創建）統一加 master=self。                               │
+│     • 確保 var 持有：對於 Checkbutton/Entry 等，有使用 w.var = var 保存引用，避免被 GC。                             │
+│  • 關閉序列與銷毀次序                                                                                                │
+│     • SettingsDialog._save_and_apply 與 _on_close：先寫入 runtime，再 self.destroy()；show_settings_ui 裡的          │
+│       root.wait_window(dlg) → root.destroy() 順序保持。                                                              │
+│     • 確認沒有在其他 thread 操作 Tk（Flask 在背景 thread OK，但 Tk 僅在主執行緒）。                                  │
+│  • 如仍有殘餘：在 SettingsDialog.init 最後集中保存所有 var 到 self._vars（list）延後                                 │
+│    GC，並在對話框銷毀時清單才釋放。                                                                                  │
+│                                                                                                                      │
+│ P2 補 Timeline 分頁欄位（保持單排）                                                                                  │
+│                                                                                                                      │
+│  • 在 PARAMS_SPEC 補上 10 個欄位的定義（含 label/help/type，PATH_MAPPINGS 用 multiline）。                           │
+│  • 確認 _spec_by_key 能找得到，TABS 渲染時會顯示控件。                                                               │
+│  • 驗證儲存/載入：寫入 runtime_settings.json，並可 apply 回 settings。                                               │
+│                                                                                                                      │
+│ P3 修可滾動區的灰色空白                                                                                              │
+│                                                                                                                      │
+│                                                                                                                      │
+│  • 在 make_scrollable：                                                                                              │
+│     • inner 綁定  後除了更新 scrollregion，亦確保內層寬度適配 canvas（必要時 canvas.itemconfigure(window_id,         │
+│       width=canvas.winfo_width())）。                                                                                │
+│     • 在每個 tab 初始化完成後，立即 canvas.configure(scrollregion=canvas.bbox('all'))。                              │
+│     • 確保 MouseWheel 綁定僅作用於當前 tab 的內部，不影響其他控件焦點。                                              │
+│                                                                                                                      │
+│ P4 品質補強（小）                                                                                                    │
+│                                                                                                                      │
+│  • 增加 LAST_SETTINGS_OPENED_AT 與 LAST_SETTINGS_ACTIVE_TAB：                                                        │
+│     • show_settings_ui 打開時寫入當前時間戳；                                                                        │
+│     • 變更 active tab 時更新 LAST_SETTINGS_ACTIVE_TAB；                                                              │
+│     • 下次開啟 nb.select(上次分頁)。                                                                                 │
+│  • /ui/timeline 的 UX 小優化（不影響主線）                                                                           │
+│     • 後端解析 t_* 勾選合併成 types 參數。                                                                           │
+│     • 分頁保留所有查詢。                                                                                             │
+│     • 詳情 JSON 美化（折疊）。                                                                                       │
+│                                                                                                                      │
+│ 四、驗證清單（Smoke Tests）                                                                                          │
+│                                                                                                                      │
+│  • 啟動 main.py：                                                                                                    │
+│     • 設定 UI 正常彈出，無 RuntimeError/SyntaxWarning。                                                              │
+│     • 滾動各分頁不再出現大面積灰底空白。                                                                             │
+│     • 「時間線 / Timeline」分頁有 10 個欄位，保存後寫入 runtime_settings.json。                                      │
+│  • 關閉設定：                                                                                                        │
+│     • 不拋錯；runtime 有 LAST_SETTINGS_OPENED_AT 與 LAST_SETTINGS_ACTIVE_TAB。                                       │
+│  • Timeline 自動開頁：                                                                                               │
+│     • 首次啟動後自動打開 http://127.0.0.1:5000/ui/timeline。                                                         │
+│  • 事件寫入：                                                                                                        │
+│     • 修改 WATCH_FOLDERS 中的 Excel；/ui/timeline 出現新事件；能用 filters 搜索。                                    │
+│                                                                                                                      │
+│ 五、風險與備註                                                                                                       │
+│                                                                                                                      │
+│  • Tkinter 的 del RuntimeError 在 3.12 更敏感；需要確保 master 綁定、引用保持、關閉順序正確；這部分是明日首要任務。  │
+│  • 手動還原檔案容易遺漏變數，導致分頁空白；補 PARAMS_SPEC 即可解決。                                                 │
+│  • 背景 Flask 與 Tk 沒問題，但 Tk 只可在主執行緒；我們會留意任何跨執行緒呼叫 Tk 的地方。                             │
+│                                                                                                                      │
+│ 六、需要你確認/偏好                                                                                                  │
+│                                                                                                                      │
+│  • 是否保留 OPEN_TIMELINE_ON_START 預設 True（我已設 True，啟動會自動開頁）。                                        │
+│  • Timeline 分頁中的說明文字是否需要特別措辭或樣式。                                                                 │
+│                                                                                                                      │
+│ 七、文件更新（明日動手後會同步）                                                                                     │
+│                                                                                                                      │
+│  • docs/Handover_Progress_Tracker.md：把「設定 UI 修復」「Timeline 分頁欄位補齊」「Tkinter                           │
+│    銷毀序」標記為已修復，並追加驗證結果。                                                                            │
+│  • docs/Conversation_Log_2025-08-31.md：逆序追加明日每一個修復步驟與結果。                                           │
+│                                                                                                                      │
+│ 如無異議，明日我會照以上 P1 → P2 → P3 → P4 的順序一次過執行；完成後提供修復摘要與驗證結果。你要唔要我保持            │
+│ OPEN_TIMELINE_ON_START=True（預設啟動自動開頁）？    
