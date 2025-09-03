@@ -21,6 +21,7 @@ class BlackConsoleWindow:
         self.topmost_timer = None
         self._ui_thread = None
         self._ready_evt = threading.Event()
+        self._tkinter_vars = []  # 追蹤 tkinter 變數
 
     def create_window(self):
         """創建黑色 console 視窗（只在 UI 線程中調用）"""
@@ -203,6 +204,7 @@ class BlackConsoleWindow:
                 logging.error(f"Console UI 執行錯誤: {e}")
             finally:
                 self.running = False
+                self._cleanup_vars()
 
         self._ui_thread = threading.Thread(target=run_window, daemon=True, name="ConsoleUIThread")
         self._ui_thread.start()
@@ -210,10 +212,25 @@ class BlackConsoleWindow:
         # 等待 UI 準備好（避免外部過早呼叫）
         self._ready_evt.wait(timeout=5.0)
 
+    def _cleanup_vars(self):
+        """清理 tkinter 變數"""
+        try:
+            # 清理所有追蹤的變數
+            for var in self._tkinter_vars:
+                try:
+                    if hasattr(var, '_tk'):
+                        var._tk = None
+                except Exception:
+                    pass
+            self._tkinter_vars.clear()
+        except Exception:
+            pass
+
     def stop(self):
         """跨線程安全關閉 Tk 視窗與 mainloop"""
         if not self.root:
             self.running = False
+            self._cleanup_vars()
             return
 
         def _shutdown():
@@ -224,6 +241,7 @@ class BlackConsoleWindow:
                         self.root.after_cancel(self.topmost_timer)
                     except Exception:
                         pass
+                self._cleanup_vars()
                 self.root.quit()     # 退出 mainloop
                 self.root.destroy()  # 銷毀視窗
             except Exception:
@@ -232,7 +250,8 @@ class BlackConsoleWindow:
         try:
             self.root.after(0, _shutdown)
         except Exception:
-            pass
+            self.running = False
+            self._cleanup_vars()
 
 # 全局 console 視窗實例
 black_console = None
