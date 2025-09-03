@@ -1059,6 +1059,11 @@ class SettingsDialog(tk.Toplevel):
             old_data = load_runtime_settings() or {}
             merged = dict(old_data)
             for k, v in (new_data or {}).items():
+                # 對於集合型別（list/tuple/dict），即使為空也視為「使用者明確清空」，必須覆蓋
+                if isinstance(v, (list, tuple, dict)):
+                    merged[k] = v
+                    continue
+                # 文字型別空白代表「不變更」，不覆蓋
                 if _is_blank(v):
                     continue
                 merged[k] = v

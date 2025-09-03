@@ -325,6 +325,38 @@ class ExcelFileEventHandler(FileSystemEventHandler):
             author_info = f" (最後儲存者: {last_author})" if last_author != 'Unknown' else ""
         except Exception as e:
             author_info = ""
+
+        # Monitor-only 首次事件：直接建立基準線，避免先印出「檔案變更偵測」橫幅
+        if self._is_monitor_only(file_path):
+            try:
+                from core.baseline import get_baseline_file_with_extension, save_baseline
+                from core.excel_parser import dump_excel_cells_with_timeout, hash_excel_content
+                from utils.helpers import _baseline_key_for_path, get_file_mtime
+                base_key = _baseline_key_for_path(file_path)
+                baseline_exists = bool(get_baseline_file_with_extension(base_key))
+                if not baseline_exists:
+                    mtime = get_file_mtime(file_path)
+                    print(f"    [MONITOR-ONLY] {file_path}\n       - 最後修改時間: {mtime}\n       - 最後儲存者: {last_author}")
+                    cur = dump_excel_cells_with_timeout(file_path)
+                    if cur:
+                        bdata = {
+                            "last_author": last_author,
+                            "content_hash": hash_excel_content(cur),
+                            "cells": cur,
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        # 補上 source_mtime/size 供快速跳過判斷使用
+                        try:
+                            bdata["source_mtime"] = os.path.getmtime(file_path)
+                            bdata["source_size"] = os.path.getsize(file_path)
+                        except Exception:
+                            pass
+                        save_baseline(base_key, bdata)
+                        print("    [MONITOR-ONLY] 已建立首次基準線（本次不比較）。")
+                        return
+            except Exception as e:
+                logging.warning(f"monitor-only 初始化失敗: {e}")
+                return
         
         # 先做一次靜默比對，若無變更則不噪音輸出（仍可後續輪詢）
         from core.comparison import compare_excel_changes, set_current_event_number

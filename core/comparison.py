@@ -272,8 +272,8 @@ def compare_excel_changes(file_path, silent=False, event_number=None, is_polling
         base_key = _baseline_key_for_path(file_path)
         
         old_baseline = load_baseline(base_key)
-        # 快速跳過：若與基準線的 mtime/size 一致（容差內），直接判定無變化
-        if settings.QUICK_SKIP_BY_STAT and old_baseline and \
+        # 快速跳過：只在「輪詢比較」時啟用；即時比較一律重新讀取，避免漏判
+        if is_polling and settings.QUICK_SKIP_BY_STAT and old_baseline and \
            ("source_mtime" in old_baseline) and ("source_size" in old_baseline):
             try:
                 cur_mtime = os.path.getmtime(file_path)
@@ -290,10 +290,10 @@ def compare_excel_changes(file_path, silent=False, event_number=None, is_polling
             old_baseline = {}
 
         current_data = dump_excel_cells_with_timeout(file_path, show_sheet_detail=False, silent=True)
-        if not current_data:
+        if current_data is None:
             time.sleep(1)
             current_data = dump_excel_cells_with_timeout(file_path, show_sheet_detail=False, silent=True)
-            if not current_data:
+            if current_data is None:
                 if not silent:
                     print(f"❌ 重試後仍無法讀取檔案: {os.path.basename(file_path)}")
                 return False

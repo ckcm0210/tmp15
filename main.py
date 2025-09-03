@@ -25,6 +25,7 @@ from core.baseline import create_baseline_for_files_robust
 from core.watcher import active_polling_handler, ExcelFileEventHandler
 from core.comparison import set_current_event_number
 from watchdog.observers import Observer
+from watchdog.observers.polling import PollingObserver
 import atexit
 
 # 全局控制台變數，用於清理
@@ -184,11 +185,19 @@ def main():
     if settings.SCAN_ALL_MODE:
         print("\n🔍 掃描所有 Excel 檔案...")
         scan_roots = list(settings.WATCH_FOLDERS or [])
-        # 若使用者指定 SCAN_TARGET_FOLDERS，僅針對該子集掃描
-        if getattr(settings, 'SCAN_TARGET_FOLDERS', None):
+        # 若使用者在 UI 明確設定了 SCAN_TARGET_FOLDERS（即使為空），則以該清單為準
+        try:
+            from config.runtime import load_runtime_settings
+            _rt_after_ui = load_runtime_settings() or {}
+        except Exception:
+            _rt_after_ui = {}
+        if 'SCAN_TARGET_FOLDERS' in _rt_after_ui:
+            scan_roots = list(dict.fromkeys([r for r in (_rt_after_ui.get('SCAN_TARGET_FOLDERS') or []) if r]))
+        elif getattr(settings, 'SCAN_TARGET_FOLDERS', None):
+            # 後備：沿用 settings 中的值
             scan_roots = list(dict.fromkeys([r for r in settings.SCAN_TARGET_FOLDERS if r]))
         all_files = get_all_excel_files(scan_roots)
-        print(f"找到 {len(all_files)} 個 Excel 檔案")
+        print(f"找到 {len(all_files)} 個 Excel 檔案（掃描根目錄: {scan_roots}）")
     
     # 🔥 合併手動目標和掃描結果
     total_files = list(set(all_files + manual_files))
@@ -201,19 +210,50 @@ def main():
     # 啟動檔案監控
     print("\n👀 啟動檔案監控...")
     event_handler = ExcelFileEventHandler(active_polling_handler)
-    observer = Observer()
-    
+
     # 對 WATCH_FOLDERS 與 MONITOR_ONLY_FOLDERS 都要註冊監控
     watch_roots = list(dict.fromkeys(list(settings.WATCH_FOLDERS or []) + list(getattr(settings, 'MONITOR_ONLY_FOLDERS', []) or [])))
     if not watch_roots:
         print("   ⚠️  沒有任何監控根目錄（WATCH_FOLDERS 或 MONITOR_ONLY_FOLDERS 為空）")
+
+    # 根據路徑自動選擇 Watchdog 後端：
+    # - 若設定 WATCHDOG_FORCE_POLLING=1/true → 強制使用 PollingObserver
+    # - 若包含磁碟根目錄（例如 C:\）或 UNC 路徑（\\server\share）→ 使用 PollingObserver（更穩定）
+    def _is_drive_root_or_unc(p: str) -> bool:
+        try:
+            if not p:
+                return False
+            p = os.path.abspath(p)
+            # UNC
+            if p.startswith('\\\\'):
+                return True
+            drive, tail = os.path.splitdrive(p)
+            # 驅動器根（例如 C:\）
+            if drive and (p.rstrip('\\/') + os.sep) == (drive + os.sep):
+                return True
+        except Exception:
+            pass
+        return False
+
+    env_force = str(os.environ.get('WATCHDOG_FORCE_POLLING', '')).strip()
+    force_polling = env_force.lower() in {'1','true','t','yes','y','on'}
+    needs_polling = any(_is_drive_root_or_unc(f) for f in (watch_roots or []))
+
+    if force_polling or needs_polling:
+        observer = PollingObserver()
+        reason = '環境變數強制' if force_polling else '偵測到磁碟根目錄/UNC 路徑'
+        print(f"   使用輪詢後端 PollingObserver（{reason}）。")
+    else:
+        observer = Observer()
+        print("   使用原生後端 Observer（效能較佳）。")
+
     for folder in watch_roots:
         if os.path.exists(folder):
             observer.schedule(event_handler, folder, recursive=True)
             print(f"   監控: {folder}")
         else:
             print(f"   ⚠️  資料夾不存在: {folder}")
-    
+
     observer.start()
     
     print("\n✅ Excel Monitor 已啟動完成！")
