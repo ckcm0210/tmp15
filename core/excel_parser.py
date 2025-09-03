@@ -266,48 +266,55 @@ def safe_load_workbook(path, max_retry=5, delay=0.5, **kwargs):
 def dump_excel_cells_with_timeout(path, show_sheet_detail=True, silent=False):  # noqa: C901
     """
     提取 Excel 檔案中的所有儲存格數據（含公式）
+    - 會先將來源檔複製到本地快取，再以 openpyxl 讀取（絕不直接讀原檔，視設定而定）
+    - 值引擎優先用 polars（如不可用則自動回退到 XML）
+    - 修正：external_ref 先安全初始化為 False，避免 UnboundLocalError
     """
     # 更新全局變數
     settings.current_processing_file = path
     settings.processing_start_time = time.time()
-    
+
     wb = None
     try:
-        if not silent: 
-            print(f"   📊 檔案大小: {os.path.getsize(path)/(1024*1024):.1f} MB")
-        
+        if not silent:
+            try:
+                print(f"   📊 檔案大小: {os.path.getsize(path)/(1024*1024):.1f} MB")
+            except Exception:
+                pass
+
+        # 只處理快取副本
         local_path = copy_to_cache(path, silent=silent)
         if not local_path or not os.path.exists(local_path):
             if not silent:
                 print("   ❌ 無法使用快取副本（嚴格模式下不會讀取原檔），略過此檔案。")
             return None
-        
+
         read_only_mode = True
-        if not silent: 
+        if not silent:
             print(f"   🚀 讀取模式: read_only={read_only_mode}, data_only=False")
-        
+
         wb = safe_load_workbook(local_path, read_only=read_only_mode, data_only=False)
         result = {}
         worksheet_count = len(wb.worksheets)
-        
-        if not silent and show_sheet_detail: 
+
+        if not silent and show_sheet_detail:
             print(f"   工作表數量: {worksheet_count}")
-        
-        # 解析一次外部參照映射，供 prettify 使用
+
+        # 解析外部參照映射，供 prettify 使用
         ref_map = extract_external_refs(local_path)
+
         formula_cells_global = 0
         formula_coords_by_sheet = {}
 
-        # 先準備值引擎：polars 或 xml（直接使用全域 settings，避免在函數內重新 import 造成遮蔽）
+        # 準備值引擎
         value_engine = getattr(settings, 'VALUE_ENGINE', 'polars')
         persist_csv = bool(getattr(settings, 'CSV_PERSIST', False))
         persist_dir = getattr(settings, 'CACHE_FOLDER', None)
         values_by_sheet = {}
+
         try:
             if value_engine == 'polars':
-                # 優先使用 xlsx2csv+polars（若失敗會 fallback 到 polars_xml）
                 from utils.value_engines.polars_reader import read_values_from_xlsx_via_polars
-                # Debug: print engine/version
                 if not silent:
                     try:
                         import polars as _pl
@@ -319,9 +326,8 @@ def dump_excel_cells_with_timeout(path, show_sheet_detail=True, silent=False):  
                 try:
                     values_by_sheet = read_values_from_xlsx_via_polars(local_path, persist_csv=persist_csv, persist_dir=persist_dir, sheet_count=len(wb.worksheets))
                 except TypeError:
-                    # 兼容舊版函數簽名（沒有 sheet_count 參數）
                     values_by_sheet = read_values_from_xlsx_via_polars(local_path, persist_csv=persist_csv, persist_dir=persist_dir)
-                # 若 polars 提供的非空值總數為 0，回退到 polars_xml
+                # 若 polars 提供非空值為 0，回退 polars_xml
                 try:
                     nonempty_total = sum(len(v or {}) for v in (values_by_sheet or {}).values())
                 except Exception:
@@ -338,7 +344,6 @@ def dump_excel_cells_with_timeout(path, show_sheet_detail=True, silent=False):  
                     print("   [value-engine] POLARS_XML (internal XML parser -> values)")
                 values_by_sheet = read_values_from_xlsx_via_polars_xml(local_path)
             elif value_engine == 'pandas':
-                # pandas 路徑：沿用 xlsx2csv 轉 CSV，再用 pandas 讀取，與 polars 輸出格式一致
                 if not silent:
                     print("   [value-engine] PANDAS (via xlsx2csv -> pandas.read_csv)")
                 try:
@@ -356,7 +361,7 @@ def dump_excel_cells_with_timeout(path, show_sheet_detail=True, silent=False):  
                     print("   [value-engine] XML parser for values")
                 values_by_sheet = read_values_from_xlsx_via_xml(local_path)
         except Exception as e:
-            # fallback to xml with diagnostics
+            # 回退 XML 值引擎並輸出診斷
             try:
                 import sys, importlib.util
                 polars_ok = importlib.util.find_spec('polars') is not None
@@ -370,12 +375,12 @@ def dump_excel_cells_with_timeout(path, show_sheet_detail=True, silent=False):  
                 values_by_sheet = read_values_from_xlsx_via_xml(local_path)
             except Exception:
                 values_by_sheet = {}
-        # 準備 sheet 對齊順序與調試輸出
+
+        # 值引擎返回的工作表 key（供對齊/診斷）
         try:
             sheet_order = list(values_by_sheet.keys())
             if not silent:
                 print(f"   [value-engine] sheet keys from engine: {sheet_order}")
-                # 針對 polars_xml 額外輸出每張表的統計與樣本
                 if value_engine == 'polars_xml':
                     try:
                         for i, nm in enumerate(sheet_order, start=1):
@@ -394,7 +399,8 @@ def dump_excel_cells_with_timeout(path, show_sheet_detail=True, silent=False):  
                         pass
         except Exception:
             sheet_order = []
-        # 若值引擎未能返回任何工作表，直接回退到 XML 值引擎
+
+        # 若值引擎未能返回任何工作表，直接回退到 XML 值引擎一次
         if (not values_by_sheet) or (not sheet_order):
             try:
                 if not silent:
@@ -411,24 +417,26 @@ def dump_excel_cells_with_timeout(path, show_sheet_detail=True, silent=False):  
                 sheet_order = []
 
         per_sheet_formula_provided = {}
+
         for idx, ws in enumerate(wb.worksheets, 1):
             cell_count = 0
             ws_data = {}
             formula_addrs = []
 
-            # 決定本工作表對應的值引擎 key 與資料
+            # 決定值引擎對應的 key
             selected_key = ws.title if ws.title in (values_by_sheet or {}) else None
             if selected_key is None and sheet_order:
-                selected_key = list(values_by_sheet.keys())[idx-1] if idx-1 < len(values_by_sheet) else None
+                selected_key = list(values_by_sheet.keys())[idx - 1] if idx - 1 < len(values_by_sheet) else None
                 if not silent and selected_key:
                     print(f"   [value-engine] sheet name mismatch: ws.title='{ws.title}' -> fallback to index key='{selected_key}'")
+
             sheet_vals = (values_by_sheet or {}).get(selected_key, {}) if selected_key else {}
             try:
                 p_count = len(sheet_vals)
             except Exception:
                 p_count = 0
+
             if not silent:
-                # 列出最多前 50 個 keys，避免超長輸出
                 try:
                     keys_list = list(sheet_vals.keys()) if isinstance(sheet_vals, dict) else []
                     show_keys = keys_list[:50]
@@ -438,20 +446,27 @@ def dump_excel_cells_with_timeout(path, show_sheet_detail=True, silent=False):  
                     show_keys = []
                 print(f"   [map] ws_index={idx} ws_title='{ws.title}' -> key='{selected_key or ''}' provided={p_count} keys={show_keys}")
 
-            # 避免 A1 單一格未被遍歷的問題：當工作表至少有 1x1 時也應該遍歷
             if ws.max_row >= 1 and ws.max_column >= 1:
                 try:
                     # 使用索引安全推導地址，避免 EmptyCell 無 coordinate 造成早退
                     def _col_to_letters(n: int) -> str:
                         s = ''
                         while n > 0:
-                            n, r = divmod(n-1, 26)
+                            n, r = divmod(n - 1, 26)
                             s = chr(65 + r) + s
                         return s
-                    for r_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=ws.max_column, values_only=False), start=1):
+
+                    for r_idx, row in enumerate(
+                        ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=ws.max_column, values_only=False),
+                        start=1
+                    ):
                         for c_idx, cell in enumerate(row, start=1):
                             addr = f"{_col_to_letters(c_idx)}{r_idx}"
-                            # ⚡️ Patch: formula 直接存 cell.formula if present, fallback get_cell_formula
+
+                            # 安全初始化，避免未賦值就使用
+                            external_ref = False
+
+                            # 讀公式：優先 cell.formula，再 fallback get_cell_formula
                             try:
                                 if hasattr(cell, 'formula') and cell.formula:
                                     fstr = cell.formula
@@ -459,31 +474,32 @@ def dump_excel_cells_with_timeout(path, show_sheet_detail=True, silent=False):  
                                     fstr = get_cell_formula(cell)
                             except Exception:
                                 fstr = None
-                            # 對外部參照做正規化展示（還原路徑，解 %20，統一反斜線）
+
+                            # 如有公式，做 pretty 與外部參照偵測
                             if fstr:
                                 try:
                                     s_before = str(fstr)
-                                    fstr = pretty_formula(fstr, ref_map=ref_map)
-                                except Exception:
-                                    s_before = str(fstr)
-                                # 標記外部參照（源頭標籤）：命中 [n] 形式或規範化路徑前綴
-                                external_ref = False
-                                try:
+                                    try:
+                                        fstr = pretty_formula(fstr, ref_map=ref_map)
+                                    except Exception:
+                                        pass
                                     import re as _re
-                                    # [n]Sheet!A1 形式
+                                    # [n]Sheet!A1
                                     if _re.search(r"\[(\d+)\][^!\]]+!", s_before):
                                         external_ref = True
                                     # 規範化後：'...\\[Book.xlsx]Sheet'!
-                                    if not external_ref and isinstance(fstr, str) and _re.search(r"'[^']*\\\[[^\\\]]+\][^']*'!", fstr):
+                                    elif isinstance(fstr, str) and _re.search(r"'[^']*\\\[[^\\\]]+\][^']*'!", fstr):
                                         external_ref = True
                                     # 無引號 [Book.xlsx]Sheet!A1
-                                    if not external_ref and isinstance(fstr, str) and _re.search(r"\[[^\]]+\][^!]+!", fstr):
+                                    elif isinstance(fstr, str) and _re.search(r"\[[^\]]+\][^!]+!", fstr):
                                         external_ref = True
+                                    formula_addrs.append(addr)
+                                    formula_cells_global += 1
                                 except Exception:
-                                    external_ref = False
-                                formula_addrs.append(addr)
-                                formula_cells_global += 1
-                            # 取值（由值引擎供應）
+                                    # 保持 external_ref = False
+                                    pass
+
+                            # 取值（由值引擎供應；失敗則退回 cell.value）
                             try:
                                 vstr = sheet_vals.get(addr)
                             except Exception as _e:
@@ -493,26 +509,32 @@ def dump_excel_cells_with_timeout(path, show_sheet_detail=True, silent=False):  
                                     vstr = serialize_cell_value(getattr(cell, 'value', None))
                                 except Exception:
                                     vstr = None
+
                             if fstr is not None or vstr is not None:
                                 # 若值引擎已提供顯示值，直接作為 cached_value 使用，避免後續二次 data_only pass
-                                cached_v = vstr if value_engine in ('polars','polars_xml','xml') else None
-                                ws_data[addr] = {"formula": fstr, "value": vstr, "cached_value": cached_v, "external_ref": bool(external_ref)}
+                                cached_v = vstr if value_engine in ('polars', 'polars_xml', 'xml') else None
+                                ws_data[addr] = {
+                                    "formula": fstr,
+                                    "value": vstr,
+                                    "cached_value": cached_v,
+                                    "external_ref": bool(external_ref)
+                                }
                                 if fstr and (vstr is not None):
                                     per_sheet_formula_provided[selected_key or ws.title] = per_sheet_formula_provided.get(selected_key or ws.title, 0) + 1
                                 cell_count += 1
                 except Exception as _e:
                     if not silent:
                         print(f"   [read_error] sheet='{ws.title}' op='iterate_rows' err={_e}")
-            
-            if show_sheet_detail and not silent: 
+
+            if show_sheet_detail and not silent:
                 print(f"      處理工作表 {idx}/{worksheet_count}: {ws.title}（{cell_count} 有資料 cell）")
-            
-            if ws_data: 
+
+            if ws_data:
                 result[ws.title] = ws_data
             if formula_addrs:
                 formula_coords_by_sheet[ws.title] = formula_addrs
 
-        # Phase 2：可選的 cached value 比對（僅對公式格），避免外部參照刷新導致假變更
+        # Phase 2：可選 cached value 比對（僅對公式格），避免外部參照刷新導致假變更
         try:
             if getattr(settings, 'ENABLE_FORMULA_VALUE_CHECK', False) and formula_cells_global > 0:
                 # 若值引擎已提供 cached_value，則無需再做第二次 data_only pass
@@ -524,7 +546,6 @@ def dump_excel_cells_with_timeout(path, show_sheet_detail=True, silent=False):  
                 need_data_only = (provided == 0)
                 if not need_data_only:
                     if not silent:
-                        # 按工作表顯示提供情況
                         try:
                             per_sheet_counts = {}
                             for sname, coords in formula_coords_by_sheet.items():
@@ -546,10 +567,10 @@ def dump_excel_cells_with_timeout(path, show_sheet_detail=True, silent=False):  
                             print(f"   讀取公式儲存格的 cached value（共 {formula_cells_global} 格）…")
                         wb_values = safe_load_workbook(local_path, read_only=True, data_only=True)
                         try:
-                            # 若啟用「外部參照缺值補齊」，先統計外部參照且缺值的地址，優先補齊這批
+                            # 先針對外部參照且缺值者補齊
                             external_missing = {}
                             if getattr(settings, 'ALWAYS_FETCH_VALUE_FOR_EXTERNAL_REFS', True):
-                                cap = int(getattr(settings, 'EXTERNAL_REF_VALUE_FETCH_CAP', 0) or 0)
+                                cap2 = int(getattr(settings, 'EXTERNAL_REF_VALUE_FETCH_CAP', 0) or 0)
                                 for sheet_name, coords in formula_coords_by_sheet.items():
                                     for addr in coords:
                                         try:
@@ -560,10 +581,9 @@ def dump_excel_cells_with_timeout(path, show_sheet_detail=True, silent=False):  
                                                 external_missing[sheet_name].append(addr)
                                         except Exception:
                                             pass
-                                # 針對該批地址優先補值
                                 for sheet_name, addrs in external_missing.items():
-                                    if cap > 0:
-                                        addrs = addrs[:cap]
+                                    if cap2 > 0:
+                                        addrs = addrs[:cap2]
                                     if sheet_name not in wb_values.sheetnames:
                                         continue
                                     ws2 = wb_values[sheet_name]
@@ -575,14 +595,13 @@ def dump_excel_cells_with_timeout(path, show_sheet_detail=True, silent=False):  
                                         sval = serialize_cell_value(val)
                                         if sheet_name in result and addr in result[sheet_name]:
                                             result[sheet_name][addr]['cached_value'] = sval
-                            # 其餘（非外部或尚未補到）再按原來流程全量/上限補值
+                            # 其餘地址再補值
                             for sheet_name, coords in formula_coords_by_sheet.items():
                                 if sheet_name not in wb_values.sheetnames:
                                     continue
                                 ws2 = wb_values[sheet_name]
                                 for addr in coords:
                                     try:
-                                        # 如果已經在上面補過，就跳過
                                         if result.get(sheet_name, {}).get(addr, {}).get('cached_value') is not None:
                                             continue
                                         val = ws2[addr].value
@@ -598,24 +617,30 @@ def dump_excel_cells_with_timeout(path, show_sheet_detail=True, silent=False):  
                                 pass
         except Exception as e:
             logging.warning(f"讀取 cached value 失敗：{e}")
-        
-        wb.close()
-        wb = None
-        
-        if not silent and show_sheet_detail: 
+
+        try:
+            wb.close()
+            wb = None
+        except Exception:
+            pass
+
+        if not silent and show_sheet_detail:
             print(f"   ✅ Excel 讀取完成")
-        
+
         return result
-        
+
     except Exception as e:
-        if not silent: 
+        if not silent:
             logging.error(f"Excel 讀取失敗: {e}")
         return None
     finally:
-        if wb: 
-            wb.close()
+        if wb:
+            try:
+                wb.close()
+            except Exception:
+                pass
             del wb
-        
+
         # 重置全局變數
         settings.current_processing_file = None
         settings.processing_start_time = None
@@ -632,4 +657,5 @@ def hash_excel_content(cells_dict):
         return hashlib.md5(content_str.encode('utf-8')).hexdigest()
     except (TypeError, json.JSONEncodeError) as e:
         logging.error(f"計算 Excel 內容雜湊值失敗: {e}")
+
         return None
