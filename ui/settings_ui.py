@@ -1134,6 +1134,7 @@ class SettingsDialog(tk.Toplevel):
 def show_settings_ui():
     import threading
     import sys
+    import gc
     
     # 檢查是否在主線程中運行
     if threading.current_thread() is not threading.main_thread():
@@ -1179,11 +1180,35 @@ def show_settings_ui():
         if root:
             try:
                 # 清理所有 tkinter 變數
+                _cleanup_all_tkinter_vars(root)
                 root.quit()
                 root.destroy()
             except Exception:
                 pass
         
         # 強制垃圾回收
-        import gc
         gc.collect()
+
+def _cleanup_all_tkinter_vars(root):
+    """清理所有 tkinter 變數"""
+    try:
+        import gc
+        
+        # 清理所有 tkinter 變數
+        for obj in gc.get_objects():
+            if hasattr(obj, '__class__') and 'tkinter' in str(type(obj)):
+                try:
+                    if hasattr(obj, '_tk') and obj._tk:
+                        obj._tk = None
+                except Exception:
+                    pass
+        
+        # 清理根視窗
+        if root and hasattr(root, '_tk'):
+            try:
+                root._tk = None
+            except Exception:
+                pass
+                
+    except Exception:
+        pass
