@@ -27,6 +27,8 @@ from core.comparison import set_current_event_number
 from watchdog.observers import Observer
 import atexit
 
+# 全局控制台變數，用於清理
+console = None
 
 def signal_handler(signum, frame):
     """
@@ -38,24 +40,54 @@ def signal_handler(signum, frame):
         if settings.current_processing_file: 
             print(f"   目前處理檔案: {settings.current_processing_file}")
         active_polling_handler.stop()
+        # 清理控制台
+        _cleanup_console()
         print("   (再按一次 Ctrl+C 強制退出)")
     else:
         print("\n💥 強制退出...")
+        _cleanup_console()
         sys.exit(1)
 
 def _cleanup_console():
+    """清理控制台資源"""
+    global console
     try:
         if console:
             console.stop()
+            console = None
     except Exception:
         pass
+
+def _cleanup_tkinter_vars():
+    """清理所有 tkinter 變數"""
+    try:
+        import tkinter as tk
+        import gc
+        
+        # 強制清理所有 tkinter 變數
+        for obj in gc.get_objects():
+            if hasattr(obj, '__class__') and 'tkinter' in str(type(obj)):
+                try:
+                    if hasattr(obj, '_tk') and obj._tk:
+                        obj._tk = None
+                except Exception:
+                    pass
+        
+        # 執行垃圾回收
+        gc.collect()
+    except Exception:
+        pass
+
 atexit.register(_cleanup_console)
+atexit.register(_cleanup_tkinter_vars)
 
 
 def main():
     """
     主函數
     """
+    global console
+    
     # 初始化日誌系統（先初始化以清理 emoji 並加時間戳）
     init_logging()
 
@@ -89,17 +121,7 @@ def main():
     
     # 初始化控制台
     console = init_console()
-    # 如果啟用了黑色 console，需要特殊處理
-    if console and settings.ENABLE_BLACK_CONSOLE:
-        # 在主線程中處理 console 事件
-        import atexit
-        
-        def cleanup_console():
-            if console and console.running:
-                console.on_closing()
-        
-        atexit.register(cleanup_console)
-
+    
     # 啟動內嵌 Timeline 伺服器（背景執行，無需 .bat）
     try:
         if getattr(settings, 'ENABLE_TIMELINE_SERVER', True):
@@ -215,6 +237,7 @@ def main():
         observer.stop()
         observer.join()
         active_polling_handler.stop()
+        _cleanup_console()
         print("✅ 監控已停止")
 
 if __name__ == "__main__":
